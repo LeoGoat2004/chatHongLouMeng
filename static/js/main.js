@@ -90,13 +90,39 @@ async function loadNPCInfo(npcId) {
 function updateChatHeader(npcInfo) {
     // Update chat header with NPC information
     const chatHeader = document.querySelector('.chat-header');
-    chatHeader.innerHTML = `
-        <img src="${npcInfo.avatar}" alt="${npcInfo.name}">
-        <div>
-            <h2>${npcInfo.name}</h2>
-            <p>${npcInfo.description || '暂无描述'}</p>
-        </div>
-    `;
+    
+    // Find or create the header content elements
+    let headerContent = chatHeader.querySelector('.header-content');
+    if (!headerContent) {
+        // Create header content structure if it doesn't exist
+        headerContent = document.createElement('div');
+        headerContent.className = 'header-content';
+        headerContent.innerHTML = `
+            <img src="${npcInfo.avatar}" alt="${npcInfo.name}">
+            <div>
+                <h2>${npcInfo.name}</h2>
+                <p>${npcInfo.description || '暂无描述'}</p>
+            </div>
+        `;
+        
+        // Insert before header actions (if exists) or append to chat header
+        const headerActions = chatHeader.querySelector('.header-actions');
+        if (headerActions) {
+            chatHeader.insertBefore(headerContent, headerActions);
+        } else {
+            chatHeader.appendChild(headerContent);
+        }
+    } else {
+        // Update existing elements
+        const img = headerContent.querySelector('img');
+        const h2 = headerContent.querySelector('h2');
+        const p = headerContent.querySelector('p');
+        
+        img.src = npcInfo.avatar;
+        img.alt = npcInfo.name;
+        h2.textContent = npcInfo.name;
+        p.textContent = npcInfo.description || '暂无描述';
+    }
 }
 
 async function sendMessage(npcId) {
@@ -213,13 +239,13 @@ function renderMemories(memories) {
     }
     
     // Sort memories by timestamp (newest first)
-    memories.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    memories.sort((a, b) => b.timestamp - a.timestamp);
     
     memoryContent.innerHTML = memories.map(memory => `
         <div class="memory-item">
-            <div class="memory-time">${new Date(memory.timestamp).toLocaleString()}</div>
+            <div class="memory-time">${new Date(memory.timestamp * 1000).toLocaleString()}</div>
             <div class="memory-user">用户: ${memory.user_message}</div>
-            <div class="memory-npc">${memory.npc_name}: ${memory.npc_response}</div>
+            <div class="memory-npc">角色: ${memory.assistant_message}</div>
         </div>
     `).join('');
 }

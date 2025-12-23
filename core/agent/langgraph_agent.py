@@ -1,210 +1,240 @@
+# core/agent/langgraph_agent.py
+
 import os
+import logging
+from typing import Dict, Any, TypedDict
+
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import StateGraph
-from typing import Dict, List, Any, TypedDict
-import logging
+
+from core.memory.powermem import get_powermem
 
 logger = logging.getLogger(__name__)
-
-# Load environment variables
 load_dotenv()
 
-# Define workflow state
-class ChatWorkflowState(TypedDict):
-    """State definition for the chat workflow"""
+
+class ChatWorkflowState(TypedDict, total=False):
     user_message: str
     npc_info: Dict[str, Any]
     knowledge: Dict[str, str]
-    conversation_history: List[Dict[str, str]]
+    conversation_history: str  # ✅ 这里改为字符串（由 app 层裁剪/格式化）
+
+    character_state: Dict[str, Any]
+    emotion: Dict[str, Any]
+    speech_style: Dict[str, Any]
+    interaction_mode: Dict[str, Any]
+
     formatted_inputs: Dict[str, str]
     response: str
 
+
 class LangGraphAgent:
-    """LangGraph Agent - 推理与流程控制
-    
-    LangGraph只处理推理与流程，不直接接触数据库，通过PowerMem访问记忆
     """
-    
+    数据驱动、无角色特例、无固定话术的 LangGraph Agent
+    - 角色差异完全来自 npc.json 与 knowledge_base
+    - 不在 core 代码里写死角色语体
+    """
+
     def __init__(self):
-        """初始化LangGraph Agent"""
-        # Initialize LLM
         self.llm = ChatOpenAI(
-            api_key=os.getenv('API_KEY'),
-            base_url=os.getenv('API_BASE_URL'),
-            model=os.getenv('MODEL_NAME', 'qwen-turbo'),
+            api_key=os.getenv("API_KEY"),
+            base_url=os.getenv("API_BASE_URL"),
+            model=os.getenv("MODEL_NAME", "qwen-turbo"),
             temperature=0.7,
-            max_tokens=1000
+            max_tokens=1000,
         )
 
-        # Create prompt template
+        self.powermem = get_powermem()
+
         self.prompt_template = PromptTemplate(
             template=(
-                "You are {npc_name}, a {npc_description}.\n\n"  # No space after {npc_description}.
-                "## NPC Background Knowledge:\n"
-                "{knowledge}\n\n"  # No extra blank line after {knowledge}
-                "## Conversation History:\n"
-                "{conversation_history}\n\n"  # No extra blank line after {conversation_history}
-                "## Current User Message:\n"
-                "{user_message}\n\n"  # No extra blank line after {user_message}
-                "Please respond as {npc_name} would. Keep your response natural and in character.\n"
-                "Do not break character. Respond in Chinese."
+                "你正在扮演一位文学作品中的人物。\n\n"
+                "【人物信息】\n"
+                "姓名：{npc_name}\n"
+                "人物简述：{npc_description}\n\n"
+                "【约束】\n"
+                "1）始终保持人物身份，不跳出角色。\n"
+                "2）使用中文作答，风格符合人物气质与时代。\n"
+                "3）不得编造未给出的具体事实；若信息不足，应以人物口吻婉转说明。\n\n"
+                "【背景知识】\n"
+                "{knowledge}\n\n"
+                "【角色态记忆】\n"
+                "{character_state}\n\n"
+                "【当前情绪】\n"
+                "{emotion}\n\n"
+                "【话语风格】\n"
+                "{speech_style}\n\n"
+                "【交互边界】\n"
+                "{interaction_mode}\n\n"
+                "【对话历史】\n"
+                "{conversation_history}\n\n"
+                "【用户的话】\n"
+                "{user_message}\n\n"
+                "请在遵守以上约束的前提下，自然、连贯地作答。"
             ),
             input_variables=[
-                'npc_name',
-                'npc_description',
-                'knowledge',
-                'conversation_history',
-                'user_message'
-            ]
+                "npc_name",
+                "npc_description",
+                "knowledge",
+                "character_state",
+                "emotion",
+                "speech_style",
+                "interaction_mode",
+                "conversation_history",
+                "user_message",
+            ],
         )
 
-        # Create response generation chain
-        self.response_chain = self.prompt_template | self.llm | StrOutputParser()
+        self.chain = self.prompt_template | self.llm | StrOutputParser()
+        self.workflow = self._build_workflow()
 
-        # Create LangGraph workflow
-        self.workflow = self._create_workflow()
+    # =========================================================
 
-    def _create_workflow(self) -> StateGraph:
-        """Create LangGraph workflow for NPC response generation with modular nodes"""
-        # Define nodes
-        def format_knowledge(state: ChatWorkflowState) -> ChatWorkflowState:
-            """Format knowledge base"""
-            knowledge = state['knowledge']
-            formatted_knowledge = self._format_knowledge(knowledge)
+    def _build_workflow(self):
+        def load_character_state(state: ChatWorkflowState) -> ChatWorkflowState:
+            npc = state["npc_info"]
+            return {**state, "character_state": self.powermem.get_character_state(npc["id"])}
+
+        def infer_emotion(state: ChatWorkflowState) -> ChatWorkflowState:
+            """
+            轻量启发式情绪推断：
+            - 不写死具体台词
+            - 仅给出“情绪标签+强度”，用于 style policy
+            """
+            text = state.get("user_message", "") or ""
+            prev = (state.get("character_state", {}) or {}).get("current_mood", "平静")
+
+            label = "平静"
+            arousal = 0.2
+
+            # 尽量保持轻量、通用，避免角色特例
+            if any(k in text for k in ["烦", "讨厌", "不满", "生气", "恼"]):
+                label, arousal = "不悦", 0.7
+            elif any(k in text for k in ["难过", "伤心", "委屈", "唉"]):
+                label, arousal = "低落", 0.6
+
+            # 让情绪有轻微惯性（仍不写死回复）
+            if prev in ["不悦", "低落"] and label == "平静":
+                label = prev
+
+            return {**state, "emotion": {"label": label, "arousal": arousal}}
+
+        def infer_speech_style(state: ChatWorkflowState) -> ChatWorkflowState:
+            style = (state.get("npc_info", {}) or {}).get("speech_style", {}) or {}
+            return {**state, "speech_style": style}
+
+        def apply_interaction_policy(state: ChatWorkflowState) -> ChatWorkflowState:
+            policy = (state.get("npc_info", {}) or {}).get("interaction_policy", {}) or {}
+            text = state.get("user_message", "") or ""
+
+            mode = "NORMAL"
+            sensitive = policy.get("sensitive_topics", []) or []
+            if sensitive and any(t in text for t in sensitive):
+                mode = "SOFT_DEFLECT"
+
+            if (state.get("emotion", {}) or {}).get("label") == "不悦":
+                mode = "COOL_DOWN"
+
+            return {**state, "interaction_mode": {"mode": mode}}
+
+        def format_inputs(state: ChatWorkflowState) -> ChatWorkflowState:
+            # ✅ conversation_history 已由 app 层格式化为 str，这里不再 dict stringify
             return {
                 **state,
-                'formatted_inputs': {
-                    **state.get('formatted_inputs', {}),
-                    'knowledge': formatted_knowledge
-                }
-            }
-
-        def format_conversation_history(state: ChatWorkflowState) -> ChatWorkflowState:
-            """Format conversation history"""
-            conversation_history = state['conversation_history'] or []
-            formatted_history = self._format_conversation_history(conversation_history)
-            return {
-                **state,
-                'formatted_inputs': {
-                    **state.get('formatted_inputs', {}),
-                    'conversation_history': formatted_history
-                }
+                "formatted_inputs": {
+                    "knowledge": self._fmt(state.get("knowledge")),
+                    "character_state": self._fmt(state.get("character_state")),
+                    "emotion": self._fmt(state.get("emotion")),
+                    "speech_style": self._fmt(state.get("speech_style")),
+                    "interaction_mode": self._fmt(state.get("interaction_mode")),
+                    "conversation_history": state.get("conversation_history") or "无",
+                },
             }
 
         def generate_response(state: ChatWorkflowState) -> ChatWorkflowState:
-            """Generate NPC response"""
-            user_message = state['user_message']
-            npc_info = state['npc_info']
-            formatted_inputs = state['formatted_inputs'] or {}
-            
-            # Prepare prompt inputs
-            prompt_inputs = {
-                'npc_name': npc_info.get('name', 'NPC'),
-                'npc_description': npc_info.get('description', ''),
-                'knowledge': formatted_inputs.get('knowledge', ''),
-                'conversation_history': formatted_inputs.get('conversation_history', ''),
-                'user_message': user_message
-            }
-            
-            # Generate response
+            npc = state["npc_info"]
+            fmt = state["formatted_inputs"]
+
             try:
-                response = self.response_chain.invoke(prompt_inputs)
-                logger.info(f"Generated response for NPC {npc_info.get('name')}: {response[:50]}...")
+                resp = self.chain.invoke(
+                    {
+                        "npc_name": npc.get("name", npc.get("id", "角色")),
+                        "npc_description": npc.get("description", ""),
+                        **fmt,
+                        "user_message": state.get("user_message", ""),
+                    }
+                )
             except Exception as e:
-                logger.error(f"Error generating response: {e}")
-                response = "抱歉，我现在无法回答你的问题。"
-            
-            return {
-                **state,
-                'response': response
+                logger.exception(f"LLM generate failed: {e}")
+                resp = "我一时语塞，容我想想再答。"
+
+            # 轻量更新角色态（只记录 mood，不干预具体回答）
+            try:
+                emotion = state.get("emotion", {}) or {}
+                prev_state = state.get("character_state", {}) or {}
+                new_state = {
+                    **prev_state,
+                    "current_mood": emotion.get("label", prev_state.get("current_mood", "平静")),
+                }
+                self.powermem.set_character_state(npc["id"], new_state)
+            except Exception as e:
+                logger.warning(f"update character_state failed: {e}")
+
+            return {**state, "response": resp}
+
+        g = StateGraph(ChatWorkflowState)
+        g.add_node("load_character_state", load_character_state)
+        g.add_node("infer_emotion", infer_emotion)
+        g.add_node("infer_speech_style", infer_speech_style)
+        g.add_node("apply_interaction_policy", apply_interaction_policy)
+        g.add_node("format_inputs", format_inputs)
+        g.add_node("generate_response", generate_response)
+
+        g.set_entry_point("load_character_state")
+        g.add_edge("load_character_state", "infer_emotion")
+        g.add_edge("infer_emotion", "infer_speech_style")
+        g.add_edge("infer_speech_style", "apply_interaction_policy")
+        g.add_edge("apply_interaction_policy", "format_inputs")
+        g.add_edge("format_inputs", "generate_response")
+        g.set_finish_point("generate_response")
+
+        return g.compile()
+
+    # =========================================================
+
+    def _fmt(self, obj) -> str:
+        if obj is None or obj == {} or obj == [] or obj == "":
+            return "无"
+        if isinstance(obj, dict):
+            return "\n".join(f"{k}：{v}" for k, v in obj.items())
+        return str(obj)
+
+    def generate_response(
+        self,
+        user_message: str,
+        npc_info: Dict[str, Any],
+        knowledge: Dict[str, str],
+        conversation_history: str,  # ✅ 改为字符串
+    ) -> str:
+        result = self.workflow.invoke(
+            {
+                "user_message": user_message,
+                "npc_info": npc_info,
+                "knowledge": knowledge,
+                "conversation_history": conversation_history,
             }
-
-        # Create workflow graph
-        workflow = StateGraph(ChatWorkflowState)
-        
-        # Add nodes
-        workflow.add_node("format_knowledge", format_knowledge)
-        workflow.add_node("format_conversation_history", format_conversation_history)
-        workflow.add_node("generate_response", generate_response)
-        
-        # Define edges
-        workflow.set_entry_point("format_knowledge")
-        workflow.add_edge("format_knowledge", "format_conversation_history")
-        workflow.add_edge("format_conversation_history", "generate_response")
-        workflow.set_finish_point("generate_response")
-        
-        # Compile workflow
-        return workflow.compile()
-
-    def _format_knowledge(self, knowledge: Dict[str, str]) -> str:
-        """Format knowledge base for prompt"""
-        if not knowledge:
-            return "无"
-        
-        formatted = []
-        for category, content in knowledge.items():
-            formatted.append(f"{category}: {content}")
-        
-        return "\n".join(formatted)
-
-    def _format_conversation_history(self, history: List[Dict[str, str]]) -> str:
-        """Format conversation history for prompt"""
-        if not history:
-            return "无"
-        
-        formatted = []
-        for entry in history:
-            user_msg = entry.get('user_message', '')
-            assistant_msg = entry.get('assistant_message', '')
-            if user_msg:
-                formatted.append(f"用户: {user_msg}")
-            if assistant_msg:
-                formatted.append(f"NPC: {assistant_msg}")
-        
-        return "\n".join(formatted)
-
-    def generate_response(self, user_message: str, npc_info: Dict[str, Any], 
-                         knowledge: Dict[str, str], conversation_history: List[Dict[str, str]]) -> str:
-        """生成NPC响应
-        
-        Args:
-            user_message (str): 用户消息
-            npc_info (Dict[str, Any]): NPC信息
-            knowledge (Dict[str, str]): NPC知识库
-            conversation_history (List[Dict[str, str]]): 对话历史
-            
-        Returns:
-            str: NPC响应内容
-        """
-        # Prepare initial state
-        initial_state = {
-            'user_message': user_message,
-            'npc_info': npc_info,
-            'knowledge': knowledge,
-            'conversation_history': conversation_history,
-            'formatted_inputs': {},
-            'response': ''
-        }
-        
-        # Run workflow
-        result = self.workflow.invoke(initial_state)
-        
-        return result.get('response', "抱歉，我现在无法回答你的问题。")
+        )
+        return result.get("response", "")
 
 
-# 创建单例实例
-_langgraph_agent_instance = None
+_langgraph_agent = None
 
-def get_langgraph_agent():
-    """获取LangGraph Agent单例
-    
-    Returns:
-        LangGraphAgent: LangGraph Agent实例
-    """
-    global _langgraph_agent_instance
-    if _langgraph_agent_instance is None:
-        _langgraph_agent_instance = LangGraphAgent()
-    return _langgraph_agent_instance
+
+def get_langgraph_agent() -> LangGraphAgent:
+    global _langgraph_agent
+    if _langgraph_agent is None:
+        _langgraph_agent = LangGraphAgent()
+    return _langgraph_agent
