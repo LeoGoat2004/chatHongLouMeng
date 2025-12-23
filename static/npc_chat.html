@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NPC对话</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+    <div class="container">
+        <button class="back-button" onclick="window.location.href='/'">返回NPC列表</button>
+        
+        <div class="chat-container">
+            <div class="chat-header">
+                <!-- NPC信息将由JavaScript加载 -->
+                <div class="header-actions">
+                    <button id="viewMemories" class="memory-button">查看记忆</button>
+                    <button id="clearMemories" class="memory-button">清除记忆</button>
+                </div>
+            </div>
+            
+            <div class="chat-messages">
+                <!-- 聊天消息将由JavaScript加载 -->
+            </div>
+            
+            <div class="chat-input-container">
+                <div class="chat-input">
+                    <input type="text" id="messageInput" placeholder="输入消息...">
+                    <button id="sendMessage">发送</button>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 记忆可视化弹窗 -->
+        <div id="memoryModal" class="modal">
+            <div class="modal-content">
+                <span class="close">&times;</span>
+                <h2>对话记忆</h2>
+                <div id="memoryContent" class="memory-content">
+                    <!-- 记忆内容将由JavaScript加载 -->
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="/static/js/main.js"></script>
+</body>
+</html>

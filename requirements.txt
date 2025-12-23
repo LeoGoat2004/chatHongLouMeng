@@ -1,0 +1,19 @@
+# 核心Web框架
+flask>=2.0.0
+
+# 环境变量管理
+python-dotenv>=1.0.0
+
+# 语言模型框架
+langgraph>=0.1.0
+langchain-openai>=0.0.1
+langchain-core>=0.1.0
+langchain-text-splitters>=0.0.1
+
+# 记忆管理系统
+powermem>=0.1.0
+pyseekdb>=0.0.1
+
+# 辅助库
+pyyaml>=6.0.0
+requests>=2.31.0
