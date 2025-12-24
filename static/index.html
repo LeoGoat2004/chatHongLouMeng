@@ -5,6 +5,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>chatHLM - 对话系统</title>
     <link rel="stylesheet" href="/static/css/styles.css">
+    <script>
+        // 页面加载前设置主题，避免闪烁
+        (function() {
+            const savedTheme = localStorage.getItem('theme');
+            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const initialTheme = savedTheme || (prefersDark ? 'dark' : 'light');
+            
+            // 确保主题类应用到body元素
+            const body = document.body;
+            if (initialTheme === 'dark') {
+                body.classList.add('night-mode');
+            } else {
+                body.classList.remove('night-mode');
+            }
+        })();
+    </script>
 </head>
 <body>
     <div class="container">
@@ -12,6 +28,10 @@
             <h1>chatHLM</h1>
             <p>红楼梦人物对话</p>
         </header>
+        
+        <div class="toggle-container">
+            <div class="toggle" id="themeToggle"></div>
+        </div>
         
         <main class="main">
             <section class="npc-list">

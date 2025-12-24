@@ -8,7 +8,53 @@ document.addEventListener('DOMContentLoaded', function() {
     if (window.location.pathname.includes('/npc/')) {
         initializeChat();
     }
+    
+    // Initialize theme toggle
+    initializeThemeToggle();
 });
+
+function initializeThemeToggle() {
+    // Initialize theme toggle functionality
+    const themeToggle = document.getElementById('themeToggle');
+    if (!themeToggle) return;
+    
+    // Check saved theme preference
+    const savedTheme = localStorage.getItem('theme');
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    
+    // Set initial theme - default to light if no preference
+    const initialTheme = savedTheme || (prefersDark ? 'dark' : 'light');
+    
+    // Debug log
+    console.log('Initial theme:', initialTheme);
+    console.log('Theme toggle element:', themeToggle);
+    
+    setTheme(initialTheme);
+    
+    // Add event listener to toggle button
+    themeToggle.addEventListener('click', function() {
+        const currentTheme = document.body.classList.contains('night-mode') ? 'dark' : 'light';
+        const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+        setTheme(newTheme);
+        localStorage.setItem('theme', newTheme);
+        console.log('Theme changed to:', newTheme);
+    });
+}
+
+function setTheme(theme) {
+    // Set theme for the page
+    const themeToggle = document.getElementById('themeToggle');
+    const body = document.body;
+    if (!themeToggle) return;
+    
+    if (theme === 'dark') {
+        body.classList.add('night-mode');
+        themeToggle.classList.add('active');
+    } else {
+        body.classList.remove('night-mode');
+        themeToggle.classList.remove('active');
+    }
+}
 
 async function loadNPCs() {
     // Load all NPCs from server

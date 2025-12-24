@@ -8,12 +8,7 @@ python-dotenv>=1.0.0
 langgraph>=0.1.0
 langchain-openai>=0.0.1
 langchain-core>=0.1.0
-langchain-text-splitters>=0.0.1
 
 # 记忆管理系统
 powermem>=0.1.0
 pyseekdb>=0.0.1
-
-# 辅助库
-pyyaml>=6.0.0
-requests>=2.31.0

@@ -63,7 +63,7 @@ class LangGraphAgent:
         self.graph = self._build_graph()
 
     # -------------------------
-    # 构建 LLM（兼容 DashScope OpenAI compatible-mode）
+    # 构建 LLM
     # -------------------------
     def _build_llm(self) -> ChatOpenAI:
         """
@@ -87,7 +87,6 @@ class LangGraphAgent:
         if not api_key:
             raise RuntimeError("Missing API key: set API_KEY (or OPENAI_API_KEY) in .env")
 
-        # base_url 对 openai 官方可为空，但对 DashScope 兼容模式通常需要
         llm = ChatOpenAI(
             api_key=api_key,
             base_url=base_url,
@@ -154,7 +153,7 @@ class LangGraphAgent:
         if memory_block:
             system_prompt += f"\n\n【长期记忆】\n{memory_block}"
 
-        # 将 system prompt 作为首条消息（system role 用 AIMessage 承载，最少侵入）
+        # 将 system prompt 作为首条消息
         state["messages"] = [AIMessage(content=system_prompt)] + state["messages"]
         return state
 
@@ -198,7 +197,7 @@ class LangGraphAgent:
         return state
 
     # -------------------------
-    # 对外运行接口（给 app.py 用）
+    # 对外运行接口
     # -------------------------
     def run(self, session_id: str, npc_id: str, user_text: str) -> str:
         """

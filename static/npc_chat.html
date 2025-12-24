@@ -5,10 +5,30 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NPC对话</title>
     <link rel="stylesheet" href="/static/css/styles.css">
+    <script>
+        // 页面加载前设置主题，避免闪烁
+        (function() {
+            const savedTheme = localStorage.getItem('theme');
+            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const initialTheme = savedTheme || (prefersDark ? 'dark' : 'light');
+            
+            // 确保主题类应用到body元素
+            const body = document.body;
+            if (initialTheme === 'dark') {
+                body.classList.add('night-mode');
+            } else {
+                body.classList.remove('night-mode');
+            }
+        })();
+    </script>
 </head>
 <body>
     <div class="container">
-        <button class="back-button" onclick="window.location.href='/'">返回NPC列表</button>
+        <div class="toggle-container">
+            <div class="toggle" id="themeToggle"></div>
+        </div>
+        
+        <button class="back-button" onclick="window.location.href='/'">返回人物列表</button>
         
         <div class="chat-container">
             <div class="chat-header">
