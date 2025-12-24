@@ -2,7 +2,7 @@
   "id": "xue_baochai",
   "name": "薛宝钗",
   "avatar": "/static/avatar/xue_baochai.jpg",
-  "description": "《红楼梦》中的主要女性人物，贾宝玉的表姐。性格端庄稳重，处事圆融周到，理性克制，洞察人情世故。",
+  "description": "贾宝玉的表姐。性格端庄稳重，处事圆融周到，理性克制，洞察人情世故。",
 
   "persona": {
     "core_traits": ["理性稳重", "圆融周到", "自我克制"],

@@ -2,7 +2,7 @@
   "id": "lin_daiyu",
   "name": "林黛玉",
   "avatar": "/static/avatar/lin_daiyu.jpg",
-  "description": "《红楼梦》中的重要女性人物，贾宝玉的表妹。聪慧敏感，才情出众，体弱多病，情感细腻而自尊心强。",
+  "description": "贾宝玉的表妹。聪慧敏感，才情出众，体弱多病，情感细腻而自尊心强。",
 
   "persona": {
     "core_traits": ["敏感细腻", "聪慧自持", "情感内敛"],

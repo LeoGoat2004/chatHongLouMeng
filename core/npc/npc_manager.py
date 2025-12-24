@@ -1,112 +1,198 @@
 # core/npc/npc_manager.py
 
-import os
 import json
-from typing import Dict, Any
-
-BASE_DIR = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-)
-NPC_DIR = os.path.join(BASE_DIR, "npc")
-KNOWLEDGE_BASE_DIR = os.path.join(BASE_DIR, "knowledge_base")
+import os
+from typing import Dict, Optional
 
 
 class NPCManager:
     """
-    NPC 配置管理器
-    - 加载 / 校验 / 规范化 npc.json
+    NPC 静态设定管理器
+
+    职责：
+    - 读取 npc.json（角色行为/风格指令）
+    - 读取 knowledge_base（人物/世界静态背景）
+    - 生成稳定、可控的 system prompt
+
+    不负责：
+    - 记忆（PowerMem）
+    - 对话状态
+    - LangGraph 流程
     """
 
-    def __init__(self, npc_dir: str = NPC_DIR, knowledge_base_dir: str = KNOWLEDGE_BASE_DIR):
-        self._cache: Dict[str, Dict[str, Any]] = {}
+    def __init__(
+        self,
+        npc_dir: str,
+        knowledge_base_dir: str,
+    ):
         self.npc_dir = npc_dir
         self.knowledge_base_dir = knowledge_base_dir
 
-    def get_npc(self, npc_id: str) -> Dict[str, Any]:
-        if npc_id in self._cache:
-            return self._cache[npc_id]
-
-        path = os.path.join(self.npc_dir, f"{npc_id}.json")
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"NPC 不存在: {npc_id}")
-
-        with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-
-        npc = self._normalize(raw)
-        self._cache[npc_id] = npc
-        return npc
-
-    def get_all_npcs(self) -> Dict[str, Dict[str, Any]]:
+    # -----------------------------
+    # 对外主入口
+    # -----------------------------
+    def get_npc(self, npc_id: str) -> Dict:
         """
-        获取所有NPC的信息
+        返回：
+        {
+          "id": npc_id,
+          "name": "...",
+          "prompt": "...",   # 已拼接好的 system prompt
+          "meta": {...}      # 其他配置（可选）
+        }
         """
-        all_npcs = {}
-        if not os.path.exists(self.npc_dir):
-            return all_npcs
-        
-        for fname in os.listdir(self.npc_dir):
-            if fname.endswith(".json"):
-                npc_id = fname[:-5]  # 去掉.json后缀
-                try:
-                    npc_info = self.get_npc(npc_id)
-                    all_npcs[npc_id] = npc_info
-                except Exception as e:
-                    print(f"Error loading NPC {npc_id}: {e}")
-        return all_npcs
+        npc_config = self._load_npc_config(npc_id)
+        background = self._load_background(npc_id)
 
-    def get_npc_knowledge(self, npc_id: str) -> Dict[str, str]:
-        """
-        获取NPC的知识库
-        """
-        npc_knowledge_dir = os.path.join(self.knowledge_base_dir, npc_id)
-        if not os.path.exists(npc_knowledge_dir):
-            return {}
-        knowledge = {}
-        for fname in os.listdir(npc_knowledge_dir):
-            if not fname.endswith(".txt"):
-                continue
-            file_path = os.path.join(npc_knowledge_dir, fname)
-            with open(file_path, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-                if content:
-                    knowledge[fname.replace(".txt", "")] = content
-        return knowledge
-
-    def _normalize(self, raw: Dict[str, Any]) -> Dict[str, Any]:
-        npc_id = raw.get("id")
-        if not npc_id:
-            raise ValueError("npc.json 缺少 id 字段")
+        prompt = self._build_prompt(
+            npc_config=npc_config,
+            background=background,
+        )
 
         return {
             "id": npc_id,
-            "name": raw.get("name", npc_id),
-            "avatar": raw.get("avatar", ""),
-            "description": raw.get("description", ""),
-
-            "persona": raw.get("persona", {}),
-
-            "speech_style": raw.get("speech_style", {
-                "base_style": "稳妥克制",
-                "tone": "",
-                "diction": "",
-                "tempo": "",
-                "addressing": "",
-                "forbidden": []
-            }),
-
-            "interaction_policy": raw.get("interaction_policy", {
-                "towards_user": "",
-                "sensitive_topics": []
-            })
+            "name": npc_config.get("name", npc_id),
+            "avatar": npc_config.get("avatar", "/static/avatar/default.jpg"),
+            "description": npc_config.get("description", ""),
+            "prompt": prompt,
+            "meta": {
+                k: v
+                for k, v in npc_config.items()
+                if k not in {"name", "instruction", "avatar", "description"}
+            },
         }
 
+    def get_all_npcs(self) -> list:
+        """
+        获取所有可用的NPC列表
+        返回：
+        [          {"id": "npc_id", "name": "npc_name"},          ...        ]
+        """
+        npcs = []
+        if os.path.exists(self.npc_dir):
+            for filename in os.listdir(self.npc_dir):
+                if filename.endswith(".json"):
+                    npc_id = filename[:-5]  # 移除.json扩展名
+                    try:
+                        npc_config = self._load_npc_config(npc_id)
+                        npcs.append({
+                            "id": npc_id,
+                            "name": npc_config.get("name", npc_id),
+                            "avatar": npc_config.get("avatar", "/static/avatar/default.jpg"),
+                            "description": npc_config.get("description", "")
+                        })
+                    except FileNotFoundError:
+                        continue
+        return npcs
 
-_npc_manager_instance = None
+    # -----------------------------
+    # 内部方法
+    # -----------------------------
+    def _load_npc_config(self, npc_id: str) -> Dict:
+        path = os.path.join(self.npc_dir, f"{npc_id}.json")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"NPC config not found: {path}")
 
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
 
-def get_npc_manager() -> NPCManager:
-    global _npc_manager_instance
-    if _npc_manager_instance is None:
-        _npc_manager_instance = NPCManager()
-    return _npc_manager_instance
+    def _load_background(self, npc_id: str) -> Optional[str]:
+        """
+        默认读取：
+        knowledge_base/{npc_id}/background.txt
+
+        若不存在则返回 None（允许某些 NPC 无背景）
+        """
+        path = os.path.join(
+            self.knowledge_base_dir,
+            npc_id,
+            "background.txt",
+        )
+        if not os.path.exists(path):
+            return None
+
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read().strip()
+            return text if text else None
+
+    def _build_prompt(self, npc_config: Dict, background: Optional[str]) -> str:
+        sections = []
+
+        # 1️⃣ 背景（客观事实）
+        if background:
+            sections.append(
+                f"【人物背景与世界设定】\n{background}"
+            )
+
+        # 2️⃣ 指令（核心任务）
+        instruction = npc_config.get("instruction", "")
+        if instruction:
+            sections.append(
+                f"【核心任务指令】\n{instruction}"
+            )
+
+        # 3️⃣ 身份 + 性格
+        desc = npc_config.get("description")
+        persona = npc_config.get("persona", {})
+
+        persona_lines = []
+        if persona:
+            if persona.get("core_traits"):
+                persona_lines.append(
+                    f"核心性格特质：{', '.join(persona['core_traits'])}"
+                )
+            if persona.get("values"):
+                persona_lines.append(
+                    f"价值观：{', '.join(persona['values'])}"
+                )
+            if persona.get("flaws"):
+                persona_lines.append(
+                    f"性格弱点：{', '.join(persona['flaws'])}"
+                )
+
+        identity_block = []
+        if desc:
+            identity_block.append(desc)
+        if persona_lines:
+            identity_block.append("\n".join(persona_lines))
+
+        if identity_block:
+            sections.append(
+                "【人物身份与性格】\n" + "\n".join(identity_block)
+            )
+
+        # 3️⃣ 语言风格
+        speech = npc_config.get("speech_style", {})
+        if speech:
+            style_lines = []
+            for k, v in speech.items():
+                if isinstance(v, list):
+                    style_lines.append(f"{k}：{', '.join(v)}")
+                else:
+                    style_lines.append(f"{k}：{v}")
+            sections.append(
+                "【语言风格与表达习惯】\n" + "\n".join(style_lines)
+            )
+
+        # 4️⃣ 互动策略
+        policy = npc_config.get("interaction_policy", {})
+        if policy:
+            policy_lines = []
+            for k, v in policy.items():
+                if isinstance(v, list):
+                    policy_lines.append(f"{k}：{', '.join(v)}")
+                else:
+                    policy_lines.append(f"{k}：{v}")
+            sections.append(
+                "【互动与行为策略】\n" + "\n".join(policy_lines)
+            )
+
+        # 5️⃣ 系统约束（统一兜底）
+        sections.append(
+            "【系统约束】\n"
+            "你始终以该角色的第一人称视角进行回应，"
+            "不得提及你是模型、AI 或系统提示的存在。"
+        )
+
+        return "\n\n".join(sections)
+

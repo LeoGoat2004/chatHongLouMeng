@@ -1,240 +1,248 @@
 # core/agent/langgraph_agent.py
+# LangGraph对话代理
+# 职责：使用LangGraph编排对话流程，调用LLM生成回复
+# 设计：基于状态图的流程编排，整合人物设定、记忆和对话生成
+
+from __future__ import annotations
 
 import os
-import logging
-from typing import Dict, Any, TypedDict
+from typing import TypedDict, List, Any, Optional
 
-from dotenv import load_dotenv
+from langgraph.graph import StateGraph, END
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
-from langchain_core.prompts import PromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langgraph.graph import StateGraph
 
-from core.memory.powermem import get_powermem
-
-logger = logging.getLogger(__name__)
-load_dotenv()
+from core.npc.npc_manager import NPCManager
+from core.memory.memory_store import MemoryStore
+from core.memory.conversation_log import ConversationLog
 
 
-class ChatWorkflowState(TypedDict, total=False):
-    user_message: str
-    npc_info: Dict[str, Any]
-    knowledge: Dict[str, str]
-    conversation_history: str  # ✅ 这里改为字符串（由 app 层裁剪/格式化）
-
-    character_state: Dict[str, Any]
-    emotion: Dict[str, Any]
-    speech_style: Dict[str, Any]
-    interaction_mode: Dict[str, Any]
-
-    formatted_inputs: Dict[str, str]
+class AgentState(TypedDict):
+    """
+    代理状态数据结构
+    
+    字段说明：
+    - session_id (str)：会话ID，用于区分不同的对话
+    - npc_id (str)：NPC唯一标识，用于获取人物设定
+    - messages (List[Any])：对话消息列表，包含系统提示、用户输入和AI回复
+    - response (str)：生成的AI回复内容
+    """
+    session_id: str
+    npc_id: str
+    messages: List[Any]
     response: str
 
 
 class LangGraphAgent:
     """
-    数据驱动、无角色特例、无固定话术的 LangGraph Agent
-    - 角色差异完全来自 npc.json 与 knowledge_base
-    - 不在 core 代码里写死角色语体
+    LangGraph对话代理
+    
+    职责：
+    - 使用LangGraph构建对话流程
+    - 加载人物设定和记忆上下文
+    - 调用LLM生成符合角色设定的回复
+    - 管理对话历史和长期记忆
+    
+    协作关系：
+    - NPCManager：提供人物设定和系统提示
+    - MemoryStore：管理长期记忆的召回和存储
+    - ConversationLog：记录短期对话历史用于展示
     """
 
-    def __init__(self):
-        self.llm = ChatOpenAI(
-            api_key=os.getenv("API_KEY"),
-            base_url=os.getenv("API_BASE_URL"),
-            model=os.getenv("MODEL_NAME", "qwen-turbo"),
-            temperature=0.7,
-            max_tokens=1000,
+    def __init__(self, npc_manager: NPCManager):
+        """
+        初始化LangGraph对话代理
+        
+        参数：
+        - npc_manager (NPCManager)：NPC管理器实例
+        """
+        self.npc_manager = npc_manager
+        self.memory = MemoryStore()
+        self.log = ConversationLog()
+        self.llm = self._build_llm()
+        self.graph = self._build_graph()
+
+    # -------------------------
+    # 构建 LLM（兼容 DashScope OpenAI compatible-mode）
+    # -------------------------
+    def _build_llm(self) -> ChatOpenAI:
+        """
+        构建LLM实例（兼容DashScope OpenAI兼容模式）
+        
+        支持的环境变量：
+        - API_KEY / OPENAI_API_KEY / DASHSCOPE_API_KEY：API密钥
+        - API_BASE_URL / OPENAI_BASE_URL：API基础地址
+        - MODEL_NAME / OPENAI_MODEL：模型名称，默认"qwen-turbo"
+        
+        返回：
+        - ChatOpenAI：配置好的LLM实例
+        
+        异常：
+        - RuntimeError：缺少API密钥时抛出
+        """
+        api_key = os.getenv("OPENAI_API_KEY") or os.getenv("API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+        base_url = os.getenv("OPENAI_BASE_URL") or os.getenv("API_BASE_URL")
+        model = os.getenv("OPENAI_MODEL") or os.getenv("MODEL_NAME") or "qwen-turbo"
+
+        if not api_key:
+            raise RuntimeError("Missing API key: set API_KEY (or OPENAI_API_KEY) in .env")
+
+        # base_url 对 openai 官方可为空，但对 DashScope 兼容模式通常需要
+        llm = ChatOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
         )
+        return llm
 
-        self.powermem = get_powermem()
+    # -------------------------
+    # LangGraph 构建
+    # -------------------------
+    def _build_graph(self):
+        """
+        构建LangGraph状态图
+        
+        返回：
+        - 编译后的LangGraph图实例
+        """
+        g = StateGraph(AgentState)
+        g.add_node("load_context", self._load_context)
+        g.add_node("generate", self._generate)
 
-        self.prompt_template = PromptTemplate(
-            template=(
-                "你正在扮演一位文学作品中的人物。\n\n"
-                "【人物信息】\n"
-                "姓名：{npc_name}\n"
-                "人物简述：{npc_description}\n\n"
-                "【约束】\n"
-                "1）始终保持人物身份，不跳出角色。\n"
-                "2）使用中文作答，风格符合人物气质与时代。\n"
-                "3）不得编造未给出的具体事实；若信息不足，应以人物口吻婉转说明。\n\n"
-                "【背景知识】\n"
-                "{knowledge}\n\n"
-                "【角色态记忆】\n"
-                "{character_state}\n\n"
-                "【当前情绪】\n"
-                "{emotion}\n\n"
-                "【话语风格】\n"
-                "{speech_style}\n\n"
-                "【交互边界】\n"
-                "{interaction_mode}\n\n"
-                "【对话历史】\n"
-                "{conversation_history}\n\n"
-                "【用户的话】\n"
-                "{user_message}\n\n"
-                "请在遵守以上约束的前提下，自然、连贯地作答。"
-            ),
-            input_variables=[
-                "npc_name",
-                "npc_description",
-                "knowledge",
-                "character_state",
-                "emotion",
-                "speech_style",
-                "interaction_mode",
-                "conversation_history",
-                "user_message",
-            ],
-        )
-
-        self.chain = self.prompt_template | self.llm | StrOutputParser()
-        self.workflow = self._build_workflow()
-
-    # =========================================================
-
-    def _build_workflow(self):
-        def load_character_state(state: ChatWorkflowState) -> ChatWorkflowState:
-            npc = state["npc_info"]
-            return {**state, "character_state": self.powermem.get_character_state(npc["id"])}
-
-        def infer_emotion(state: ChatWorkflowState) -> ChatWorkflowState:
-            """
-            轻量启发式情绪推断：
-            - 不写死具体台词
-            - 仅给出“情绪标签+强度”，用于 style policy
-            """
-            text = state.get("user_message", "") or ""
-            prev = (state.get("character_state", {}) or {}).get("current_mood", "平静")
-
-            label = "平静"
-            arousal = 0.2
-
-            # 尽量保持轻量、通用，避免角色特例
-            if any(k in text for k in ["烦", "讨厌", "不满", "生气", "恼"]):
-                label, arousal = "不悦", 0.7
-            elif any(k in text for k in ["难过", "伤心", "委屈", "唉"]):
-                label, arousal = "低落", 0.6
-
-            # 让情绪有轻微惯性（仍不写死回复）
-            if prev in ["不悦", "低落"] and label == "平静":
-                label = prev
-
-            return {**state, "emotion": {"label": label, "arousal": arousal}}
-
-        def infer_speech_style(state: ChatWorkflowState) -> ChatWorkflowState:
-            style = (state.get("npc_info", {}) or {}).get("speech_style", {}) or {}
-            return {**state, "speech_style": style}
-
-        def apply_interaction_policy(state: ChatWorkflowState) -> ChatWorkflowState:
-            policy = (state.get("npc_info", {}) or {}).get("interaction_policy", {}) or {}
-            text = state.get("user_message", "") or ""
-
-            mode = "NORMAL"
-            sensitive = policy.get("sensitive_topics", []) or []
-            if sensitive and any(t in text for t in sensitive):
-                mode = "SOFT_DEFLECT"
-
-            if (state.get("emotion", {}) or {}).get("label") == "不悦":
-                mode = "COOL_DOWN"
-
-            return {**state, "interaction_mode": {"mode": mode}}
-
-        def format_inputs(state: ChatWorkflowState) -> ChatWorkflowState:
-            # ✅ conversation_history 已由 app 层格式化为 str，这里不再 dict stringify
-            return {
-                **state,
-                "formatted_inputs": {
-                    "knowledge": self._fmt(state.get("knowledge")),
-                    "character_state": self._fmt(state.get("character_state")),
-                    "emotion": self._fmt(state.get("emotion")),
-                    "speech_style": self._fmt(state.get("speech_style")),
-                    "interaction_mode": self._fmt(state.get("interaction_mode")),
-                    "conversation_history": state.get("conversation_history") or "无",
-                },
-            }
-
-        def generate_response(state: ChatWorkflowState) -> ChatWorkflowState:
-            npc = state["npc_info"]
-            fmt = state["formatted_inputs"]
-
-            try:
-                resp = self.chain.invoke(
-                    {
-                        "npc_name": npc.get("name", npc.get("id", "角色")),
-                        "npc_description": npc.get("description", ""),
-                        **fmt,
-                        "user_message": state.get("user_message", ""),
-                    }
-                )
-            except Exception as e:
-                logger.exception(f"LLM generate failed: {e}")
-                resp = "我一时语塞，容我想想再答。"
-
-            # 轻量更新角色态（只记录 mood，不干预具体回答）
-            try:
-                emotion = state.get("emotion", {}) or {}
-                prev_state = state.get("character_state", {}) or {}
-                new_state = {
-                    **prev_state,
-                    "current_mood": emotion.get("label", prev_state.get("current_mood", "平静")),
-                }
-                self.powermem.set_character_state(npc["id"], new_state)
-            except Exception as e:
-                logger.warning(f"update character_state failed: {e}")
-
-            return {**state, "response": resp}
-
-        g = StateGraph(ChatWorkflowState)
-        g.add_node("load_character_state", load_character_state)
-        g.add_node("infer_emotion", infer_emotion)
-        g.add_node("infer_speech_style", infer_speech_style)
-        g.add_node("apply_interaction_policy", apply_interaction_policy)
-        g.add_node("format_inputs", format_inputs)
-        g.add_node("generate_response", generate_response)
-
-        g.set_entry_point("load_character_state")
-        g.add_edge("load_character_state", "infer_emotion")
-        g.add_edge("infer_emotion", "infer_speech_style")
-        g.add_edge("infer_speech_style", "apply_interaction_policy")
-        g.add_edge("apply_interaction_policy", "format_inputs")
-        g.add_edge("format_inputs", "generate_response")
-        g.set_finish_point("generate_response")
+        g.set_entry_point("load_context")
+        g.add_edge("load_context", "generate")
+        g.add_edge("generate", END)
 
         return g.compile()
 
-    # =========================================================
+    # -------------------------
+    # Node: load_context
+    # -------------------------
+    def _load_context(self, state: AgentState) -> AgentState:
+        """
+        加载对话上下文节点
+        
+        功能：
+        - 获取NPC的系统提示
+        - 从长期记忆中召回相关记忆
+        - 构建完整的上下文消息
+        
+        参数：
+        - state (AgentState)：当前代理状态
+        
+        返回：
+        - AgentState：更新后的代理状态，包含完整的上下文消息
+        """
+        npc_id = state["npc_id"]
+        npc = self.npc_manager.get_npc(npc_id)
 
-    def _fmt(self, obj) -> str:
-        if obj is None or obj == {} or obj == [] or obj == "":
-            return "无"
-        if isinstance(obj, dict):
-            return "\n".join(f"{k}：{v}" for k, v in obj.items())
-        return str(obj)
+        # 找到最新一条用户输入
+        user_text = ""
+        for m in reversed(state["messages"]):
+            if isinstance(m, HumanMessage):
+                user_text = m.content
+                break
 
-    def generate_response(
-        self,
-        user_message: str,
-        npc_info: Dict[str, Any],
-        knowledge: Dict[str, str],
-        conversation_history: str,  # ✅ 改为字符串
-    ) -> str:
-        result = self.workflow.invoke(
-            {
-                "user_message": user_message,
-                "npc_info": npc_info,
-                "knowledge": knowledge,
-                "conversation_history": conversation_history,
-            }
+        # 从 PowerMem 召回长期记忆
+        memory_block = self.memory.recall(
+            session_id=state["session_id"],
+            query=user_text,
+            k=5,
         )
-        return result.get("response", "")
+
+        system_prompt = npc["prompt"]
+        if memory_block:
+            system_prompt += f"\n\n【长期记忆】\n{memory_block}"
+
+        # 将 system prompt 作为首条消息（system role 用 AIMessage 承载，最少侵入）
+        state["messages"] = [AIMessage(content=system_prompt)] + state["messages"]
+        return state
+
+    # -------------------------
+    # Node: generate
+    # -------------------------
+    def _generate(self, state: AgentState) -> AgentState:
+        """
+        生成回复节点
+        
+        功能：
+        - 调用LLM生成回复
+        - 记录对话到短期日志
+        - 将对话内容提交到长期记忆
+        
+        参数：
+        - state (AgentState)：当前代理状态
+        
+        返回：
+        - AgentState：更新后的代理状态，包含生成的回复
+        """
+        resp = self.llm.invoke(state["messages"])
+        assistant_text = resp.content
+        state["response"] = assistant_text
+
+        # 提取当前轮 user_text（本基础版：单轮输入）
+        user_text = ""
+        for m in state["messages"]:
+            if isinstance(m, HumanMessage):
+                user_text = m.content
+                break
+
+        # 记录对话日志（用于展示/窗口）
+        self.log.append(state["session_id"], user_text, assistant_text)
+
+        # 写入长期记忆（PowerMem infer=True）
+        self.memory.commit(state["session_id"], user_text, assistant_text)
+
+        # 追加到 messages（可选：后续若要多轮窗口可用）
+        state["messages"].append(AIMessage(content=assistant_text))
+        return state
+
+    # -------------------------
+    # 对外运行接口（给 app.py 用）
+    # -------------------------
+    def run(self, session_id: str, npc_id: str, user_text: str) -> str:
+        """
+        对外运行接口
+        
+        参数：
+        - session_id (str)：会话ID
+        - npc_id (str)：NPC唯一标识
+        - user_text (str)：用户输入的消息
+        
+        返回：
+        - str：AI生成的回复内容
+        """
+        init_state: AgentState = {
+            "session_id": session_id,
+            "npc_id": npc_id,
+            "messages": [HumanMessage(content=user_text)],
+            "response": "",
+        }
+        final_state = self.graph.invoke(init_state)
+        return final_state["response"]
 
 
-_langgraph_agent = None
+# -----------------------------
+# 工厂函数：与 app.py 兼容
+# -----------------------------
+_agent_singleton: Optional[LangGraphAgent] = None
 
 
-def get_langgraph_agent() -> LangGraphAgent:
-    global _langgraph_agent
-    if _langgraph_agent is None:
-        _langgraph_agent = LangGraphAgent()
-    return _langgraph_agent
+def get_langgraph_agent(npc_manager: NPCManager) -> LangGraphAgent:
+    """
+    获取LangGraphAgent单例实例
+    
+    参数：
+    - npc_manager (NPCManager)：NPC管理器实例
+    
+    返回：
+    - LangGraphAgent：单例实例
+    
+    设计：
+    - 使用单例模式，避免重复创建代理实例
+    - 确保整个应用中只有一个代理实例在运行
+    """
+    global _agent_singleton
+    if _agent_singleton is None:
+        _agent_singleton = LangGraphAgent(npc_manager)
+    return _agent_singleton

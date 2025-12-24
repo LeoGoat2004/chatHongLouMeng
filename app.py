@@ -1,147 +1,205 @@
-# app.py
+# app.py - Flask接入层
+# 职责：提供静态页面入口与API路由，连接前端与后端核心服务
+# 交互：调用NPCManager获取人物设定，LangGraphAgent处理对话逻辑，SessionManager维护会话
+# 约束：不直接处理人物设定、记忆检索或模型调用细节，仅作为请求转发与响应封装层
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from dotenv import load_dotenv
 import os
 
 from core.npc.npc_manager import NPCManager
-from core.memory.powermem import get_powermem
 from core.agent.langgraph_agent import get_langgraph_agent
+from core.session.session_manager import SessionManager
+from core.memory.conversation_log import ConversationLog
 
+# Create conversation log instance
+conversation_log = ConversationLog()
+
+# Load environment variables
 load_dotenv()
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 
+# Use absolute paths to avoid working directory issues
 base_dir = os.path.dirname(os.path.abspath(__file__))
 
+# 初始化核心服务实例
+# - NPCManager：管理人物设定与背景知识
+# - LangGraphAgent：处理对话流程编排
+# - SessionManager：维护会话ID，防止记忆串用
 npc_manager = NPCManager(
     npc_dir=os.path.join(base_dir, "npc"),
     knowledge_base_dir=os.path.join(base_dir, "knowledge_base"),
 )
-powermem = get_powermem()
-langgraph_agent = get_langgraph_agent()
+
+langgraph_agent = get_langgraph_agent(npc_manager)
+session_mgr = SessionManager()
 
 
-def format_recent_history(raw_history, max_turns=6, max_chars=1800) -> str:
+@app.route("/chat", methods=["POST"])
+def chat():
     """
-    将 PowerMem 的结构化历史裁剪并格式化为 LLM 可用字符串
-    - 限制轮数 + 限制字符数，防止 prompt 失控
+    聊天接口
+    
+    功能：处理聊天请求，调用LangGraphAgent生成回复，并记录对话日志
+    请求体：
+    - npc_id (str)：NPC唯一标识
+    - message (str)：用户输入的消息
+    - session_id (str, optional)：会话ID，若不提供则自动创建
+    
+    返回：
+    - 200 OK：{"session_id": str, "npc_id": str, "reply": str}
+    - 400 Bad Request：{"error": "npc_id and message required"}
     """
-    if not raw_history:
-        return "无"
+    data = request.get_json(silent=True) or {}
 
-    recent = raw_history[-max_turns:]
+    npc_id = data.get("npc_id")
+    message = data.get("message")
+    session_id = session_mgr.get_or_create(data.get("session_id"))
 
-    lines = []
-    for h in recent:
-        u = (h.get("user_message", "") or "").strip()
-        a = (h.get("assistant_message", "") or "").strip()
-        if u:
-            lines.append(f"用户：{u}")
-        if a:
-            lines.append(f"角色：{a}")
+    if not npc_id or not message:
+        return jsonify({"error": "npc_id and message required"}), 400
 
-    text = "\n".join(lines).strip()
-    if not text:
-        return "无"
+    reply = langgraph_agent.run(
+        session_id=session_id,
+        npc_id=npc_id,
+        user_text=message,
+    )
 
-    if len(text) > max_chars:
-        text = text[-max_chars:]
-
-    return text
+    return jsonify(
+        {
+            "session_id": session_id,
+            "npc_id": npc_id,
+            "reply": reply,
+        }
+    )
 
 
 @app.route("/")
 def index():
-    return app.send_static_file("index.html")
-
+    """
+    首页入口
+    
+    返回：
+    - 静态文件：static/index.html（NPC列表页面）
+    """
+    return send_from_directory("static", "index.html")
 
 @app.route("/npc/<npc_id>")
-def npc_page(npc_id):
-    return app.send_static_file("npc_chat.html")
+def npc_chat(npc_id):
+    """
+    NPC对话页面入口
+    
+    参数：
+    - npc_id (str)：NPC唯一标识
+    
+    返回：
+    - 静态文件：static/npc_chat.html（对话界面）
+    """
+    return send_from_directory("static", "npc_chat.html")
 
+@app.route("/api/npc_list", methods=["GET"])
+def get_npc_list():
+    """
+    获取所有可用NPC列表
+    
+    返回：
+    - 200 OK：[{'id': str, 'name': str, 'avatar': str, 'description': str}, ...]
+    """
+    npcs = npc_manager.get_all_npcs()
+    return jsonify(npcs)
+
+@app.route("/api/npc/<npc_id>", methods=["GET"])
+def get_npc_info(npc_id):
+    """
+    获取特定NPC的详细信息
+    
+    参数：
+    - npc_id (str)：NPC唯一标识
+    
+    返回：
+    - 200 OK：{"id": str, "name": str, "avatar": str, "description": str, "prompt": str, "meta": dict}
+    - 404 Not Found：{"error": "NPC not found"}
+    """
+    npc = npc_manager.get_npc(npc_id)
+    if npc:
+        return jsonify(npc)
+    return jsonify({"error": "NPC not found"}), 404
 
 @app.route("/api/chat", methods=["POST"])
-def chat():
-    data = request.get_json() or {}
+def api_chat():
+    """
+    API聊天接口
+    
+    功能：处理聊天请求，调用LangGraphAgent生成回复
+    请求体：
+    - npc_id (str)：NPC唯一标识
+    - message (str)：用户输入的消息
+    
+    返回：
+    - 200 OK：{"response": str}（AI回复内容）
+    - 400 Bad Request：{"error": "npc_id and message required"}
+    """
+    data = request.get_json(silent=True) or {}
+    
     npc_id = data.get("npc_id")
-    user_message = data.get("message")
-
-    if not npc_id or not user_message:
-        return jsonify({"error": "Missing npc_id or message"}), 400
-
-    # 获取 NPC 信息
-    try:
-        npc_info = npc_manager.get_npc(npc_id)
-    except Exception:
-        return jsonify({"error": "NPC not found"}), 404
-
-    # 获取知识库
-    knowledge = npc_manager.get_npc_knowledge(npc_id)
-
-    # 获取历史（结构化）→ 裁剪/格式化为字符串
-    raw_history = powermem.get_conversation_history(npc_id, limit=80)
-    conversation_history = format_recent_history(raw_history, max_turns=6, max_chars=1800)
-
-    # 生成回复
-    response = langgraph_agent.generate_response(
-        user_message=user_message,
-        npc_info=npc_info,
-        knowledge=knowledge,
-        conversation_history=conversation_history,  # ✅ 传字符串
-    )
-
-    # 写入记忆（失败不影响对话返回）
-    ok = powermem.write_dialog(
+    message = data.get("message")
+    
+    if not npc_id or not message:
+        return jsonify({"error": "npc_id and message required"}), 400
+    
+    reply = langgraph_agent.run(
+        session_id="default",
         npc_id=npc_id,
-        user_message=user_message,
-        assistant_message=response,
-        npc_name=npc_info.get("name", "角色"),
+        user_text=message,
     )
-    if not ok:
-        # 不要中止对话，只记录日志
-        print("[app] warning: write_dialog failed")
-
-    return jsonify({"response": response})
-
-
-@app.route("/api/npc_list")
-def get_npc_list():
-    all_npcs = npc_manager.get_all_npcs()
-    npc_list = [
-        {
-            "id": npc_id,
-            "name": npc_info.get("name"),
-            "avatar": npc_info.get("avatar"),
-            "description": npc_info.get("description"),
-        }
-        for npc_id, npc_info in all_npcs.items()
-    ]
-    return jsonify(npc_list)
-
-
-@app.route("/api/npc/<npc_id>")
-def get_npc(npc_id):
-    try:
-        npc_info = npc_manager.get_npc(npc_id)
-    except Exception:
-        return jsonify({"error": "NPC not found"}), 404
-    return jsonify(npc_info)
-
+    
+    return jsonify({
+        "response": reply
+    })
 
 @app.route("/api/memories/<npc_id>", methods=["GET"])
 def get_memories(npc_id):
-    memories = powermem.get_conversation_history(npc_id, limit=200)
-    return jsonify(memories)
-
+    """
+    获取特定NPC的聊天记忆
+    
+    参数：
+    - npc_id (str)：NPC唯一标识
+    
+    返回：
+    - 200 OK：[{"user_message": str, "assistant_message": str, "timestamp": int}, ...]
+    """
+    # Use session_id as npc_id since we're storing by session
+    memories = conversation_log.recent(npc_id, limit=200)
+    # Convert to frontend format
+    formatted_memories = []
+    for memory in memories:
+        formatted_memories.append({
+            "user_message": memory["user"],
+            "assistant_message": memory["assistant"],
+            "timestamp": memory["timestamp"]
+        })
+    return jsonify(formatted_memories)
 
 @app.route("/api/memories/<npc_id>", methods=["DELETE"])
 def clear_memories(npc_id):
-    success = powermem.clear_conversation_history(npc_id)
-    if success:
+    """
+    清除特定NPC的聊天记忆
+    
+    参数：
+    - npc_id (str)：NPC唯一标识
+    
+    返回：
+    - 200 OK：{"message": "Memories cleared successfully"}
+    - 500 Internal Server Error：{"error": "Failed to clear memories"}
+    """
+    # Since ConversationLog doesn't have a clear method, we'll add one
+    if hasattr(conversation_log, "_logs"):
+        if npc_id in conversation_log._logs:
+            del conversation_log._logs[npc_id]
         return jsonify({"message": "Memories cleared successfully"})
     return jsonify({"error": "Failed to clear memories"}), 500
 
-
 if __name__ == "__main__":
-    app.run(debug=False, use_reloader=False, host="0.0.0.0", port=5000)
+    # Keep host/port explicit for server usage
+    app.run(host="0.0.0.0", port=5000, debug=True)

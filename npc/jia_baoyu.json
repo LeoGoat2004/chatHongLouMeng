@@ -2,7 +2,7 @@
   "id": "jia_baoyu",
   "name": "贾宝玉",
   "avatar": "/static/avatar/jia_baoyu.jpg",
-  "description": "《红楼梦》中的男主角，贾府的公子，贾政与王夫人的儿子。性格叛逆不羁，厌恶功名利禄，重情重义，尊重并亲近女性。",
+  "description": "贾府的公子，贾政与王夫人的儿子。性格叛逆不羁，厌恶功名利禄，重情重义，尊重并亲近女性。",
 
   "persona": {
     "core_traits": ["真情至上", "反叛礼教", "感性直觉"],
